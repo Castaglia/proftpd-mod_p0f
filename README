@@ -1,0 +1,5 @@
+The mod_p0f module for ProFTPD uses the p0f utility for passively fingerprinting
+clients which connect to the proftpd daemon.  The fingerprint data are
+exposed for use via notes and environment variables.
+
+For further module documentation, see mod_p0f.html.
