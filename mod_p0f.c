@@ -37,6 +37,14 @@ static int p0f_engine = FALSE;
 static const char *p0f_logname = NULL;
 static pid_t p0f_proc_pid;
 
+/* Number of seconds to wait for the p0f process to stop before we terminate
+ * it with extreme prejudice.
+ *
+ * Currently this has a granularity of seconds; needs to be in millsecs
+ * (e.g. for 500 ms timeout).
+ */
+static time_t p0f_timeout = 1;
+
 static const char *trace_channel = "p0f";
 
 /* The types of data that p0f provides, and that we care about. */
@@ -59,11 +67,11 @@ struct p0f_filter_key {
 #define P0F_FILTER_KEY_TRAFFIC_TYPE	204
 
 static struct p0f_filter_key p0f_filter_keys[] = {
-  "OS",			P0F_FILTER_KEY_OS,
-  "OSDetails",		P0F_FILTER_KEY_OS_DETAILS,
-  "NetworkDistance",	P0F_FILTER_KEY_NETWORK_DISTANCE,
-  "NetworkLink",	P0F_FILTER_KEY_NETWORK_LINK,
-  "TrafficType",	P0F_FILTER_KEY_TRAFFIC_TYPE,
+  { "OS",		P0F_FILTER_KEY_OS },
+  { "OSDetails",	P0F_FILTER_KEY_OS_DETAILS },
+  { "NetworkDistance",	P0F_FILTER_KEY_NETWORK_DISTANCE },
+  { "NetworkLink",	P0F_FILTER_KEY_NETWORK_LINK },
+  { "TrafficType",	P0F_FILTER_KEY_TRAFFIC_TYPE },
 
   { NULL, -1 }
 };
@@ -131,14 +139,14 @@ struct p0f_response {
  * p0f executable.
  */
 struct p0f_info {
-  const char *p0f_path;
-  const char *sigs_path;
-  const char *device;
-  const char *log_path;
-  const char *sock_path;
-  const char *user;
+  char *p0f_path;
+  char *sigs_path;
+  char *device;
+  char *log_path;
+  char *sock_path;
+  char *user;
   unsigned int cache_size;
-  const char *bpf_rule;
+  char *bpf_rule;
 };
 
 #define P0F_READ_MAX_ATTEMPTS	10
@@ -159,29 +167,31 @@ static void p0f_set_value(const char *key, const char *value) {
       "error adding %s session note: %s", key, strerror(errno));
   }
 
-  pr_trace_msg(trace_channel, 3, "set %s = '%s', key, value);
+  pr_trace_msg(trace_channel, 3, "set %s = '%s'", key, value);
 }
 
 static int p0f_set_info(struct p0f_response *resp) {
 
   /* resp.genre */
   if (resp->genre[0] != '\0') {
-    p0f_os = pstrndup(p0f_pool, resp->genre, sizeof(resp->genre));
+    p0f_os = pstrndup(p0f_pool, (const char *) resp->genre,
+      sizeof(resp->genre));
     p0f_set_value("P0F_OS", p0f_os);
   }
 
   /* resp.detail */
   if (resp->detail[0] != '\0') {
-    p0f_os_details = pstrdup(p0f_pool, resp->detail, sizeof(resp->detail));
+    p0f_os_details = pstrndup(p0f_pool, (const char *) resp->detail,
+      sizeof(resp->detail));
     p0f_set_value("P0F_OS_DETAILS", p0f_os_details);
   }
 
   /* resp.distance */
-  if (resp->distance != -1) {
+  if (resp->dist != -1) {
     char buf[32];
 
     memset(buf, '\0', sizeof(buf));
-    snprintf(buf, sizeof(buf)-1, "%u", resp->distance);
+    snprintf(buf, sizeof(buf)-1, "%u", resp->dist);
 
     p0f_network_distance = pstrdup(p0f_pool, buf);
     p0f_set_value("P0F_NETWORK_DISTANCE", p0f_network_distance);
@@ -189,13 +199,15 @@ static int p0f_set_info(struct p0f_response *resp) {
 
   /* resp.link */
   if (resp->link[0] != '\0') {
-    p0f_network_link = pstrndup(p0f_pool, resp->link, sizeof(resp->link));
+    p0f_network_link = pstrndup(p0f_pool, (const char *) resp->link,
+      sizeof(resp->link));
     p0f_set_value("P0F_NETWORK_LINK", p0f_network_link);
   }
 
   /* resp.tos */
   if (resp->tos[0] != '\0') {
-    p0f_traffic_type = pstrndup(p0f_pool, resp->tos, sizeof(resp->tos));
+    p0f_traffic_type = pstrndup(p0f_pool, (const char *) resp->tos,
+      sizeof(resp->tos));
     p0f_set_value("P0F_TRAFFIC_TYPE", p0f_traffic_type);
   }
 
@@ -211,7 +223,7 @@ static int p0f_set_info(struct p0f_response *resp) {
   return 0;
 }
 
-static int p0f_get_info(void) {
+static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
   unsigned int nattempts = 0;
   int ok = FALSE, res, sockfd;
   struct sockaddr_un sock;
@@ -234,7 +246,7 @@ static int p0f_get_info(void) {
   sock.sun_family = AF_UNIX;
   sstrncpy(sock.sun_path, p0f_socket, p0f_socketlen);
 
-  res = connect(sockfd, (struct sockaddr *) &sock);
+  res = connect(sockfd, (struct sockaddr *) &sock, sizeof(sock));
   if (res < 0) {
     int xerrno = errno;
 
@@ -282,7 +294,7 @@ static int p0f_get_info(void) {
     pr_signals_handle();
 
     memset(&resp, 0, sizeof(resp));
-    res = read(sock, &resp, sizeof(resp));
+    res = read(sockfd, &resp, sizeof(resp));
 
     if (res != sizeof(resp)) {
       int xerrno = errno;
@@ -336,11 +348,11 @@ static int p0f_get_info(void) {
   return res;
 }
 
-static char **p0f_get_argv(struct p0f_info *pi, const char *name) {
+static char **p0f_get_argv(struct p0f_info *pi, char *name) {
   array_header *argv_list;
 
   argv_list = make_array(p0f_pool, 5, sizeof(char **));
-  *((char **) push_array(argv_list)) = name,
+  *((char **) push_array(argv_list)) = name;
 
   /* XXX Not sure whether these options should be hardcoded. */
   *((char **) push_array(argv_list)) = "-qKU";
@@ -547,7 +559,7 @@ static int p0f_exec(struct p0f_info *pi) {
 
   if (execve(pi->p0f_path, argv, env) < 0) {
     if (p0f_logfd >= 0) {
-      /* We can do this, because stderr has been redirected to P0FLog.
+      /* We can do this, because stderr has been redirected to P0FLog. */
       fprintf(stderr, "%s: error executing '%s': %s", MOD_P0F_VERSION,
         pi->p0f_path, strerror(errno));
     }
@@ -561,9 +573,6 @@ static int p0f_exec(struct p0f_info *pi) {
    * non-zero value (the value of errno will do nicely).
    */
   exit(errno);
-
-  /* Never reached. */
-  return 0;
 }
 
 static pid_t p0f_start(struct p0f_info *pi) {
@@ -668,13 +677,13 @@ static void p0f_stop(pid_t p0f_pid) {
     if ((time(NULL) - start_time) > p0f_timeout) {
       (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
         "p0f process ID %lu took longer than timeout (%lu secs) to "
-        "stop, sending SIGKILL (signal %d)", (unsigned long) agent_pid,
+        "stop, sending SIGKILL (signal %d)", (unsigned long) p0f_pid,
         p0f_timeout, SIGKILL);
       res = kill(p0f_pid, SIGKILL);
       if (res < 0) {
         (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
          "error sending SIGKILL (signal %d) to SNMP agent process ID %lu: %s",
-         SIGKILL, (unsigned long) agent_pid, strerror(errno));
+         SIGKILL, (unsigned long) p0f_pid, strerror(errno));
       }
 
       break;
@@ -938,6 +947,7 @@ static char *p0f_get_path(cmd_rec *cmd, const char *proto) {
 static void p0f_set_error_response(cmd_rec *cmd, const char *msg) {
   if (pr_cmd_cmp(cmd, PR_CMD_LIST_ID) == 0 ||
       pr_cmd_cmp(cmd, PR_CMD_NLST_ID) == 0) {
+    size_t arglen;
 
     /* We have may received bare LIST/NLST commands, or just options and no
      * paths.  Do The Right Thing(tm) with these scenarios.
@@ -1188,7 +1198,7 @@ MODRET set_p0fuser(cmd_rec *cmd) {
   pw = getpwnam(cmd->argv[1]);
   if (pw == NULL) {
     CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a valid system user: ",
-      cmd->argv[1], NULL);
+      cmd->argv[1], NULL));
   }
 
   (void) add_config_param_str(cmd->argv[0], 1, cmd->argv[1]);
@@ -1198,7 +1208,7 @@ MODRET set_p0fuser(cmd_rec *cmd) {
 /* Command handlers
  */
 
-MODRET snmp_pre_cmd(cmd_rec *cmd) {
+MODRET p0f_pre_cmd(cmd_rec *cmd) {
   const char *proto;
   char *abs_path;
   int res;
@@ -1305,7 +1315,9 @@ static void p0f_restart_ev(const void *event_data, void *user_data) {
     return;
   }
 
-  /* XXX Stop/start p0f process?
+  /* XXX Stop/start p0f process?  That would ruin its cache, but WOULD pick
+   * up any config changes.
+   */
 }
 
 static void p0f_shutdown_ev(const void *event_data, void *user_data) {
@@ -1348,7 +1360,7 @@ static void p0f_startup_ev(const void *event_data, void *user_data) {
   }
 
   if (p0f_logfd >= 0) {
-    pi.log_path = p0f_logname;
+    pi.log_path = (char *) p0f_logname;
   }
 
   c = find_config(main_server->conf, CONF_PARAM, "P0FSocket", FALSE);
@@ -1437,8 +1449,17 @@ static int p0f_sess_init(void) {
     return 0;
   }
 
+  c = find_config(main_server->conf, CONF_PARAM, "P0FSocket", FALSE);
+  if (c == NULL) {
+    /* XXX This shouldn't happen; the lack of a P0FSocket directive should
+     * have been caught earlier.
+     */
+    p0f_engine = FALSE;
+    return 0;
+  }
+
   /* Call to p0f process, fill in notes/env vars, check ACL patterns */
-  res = p0f_get_info();
+  res = p0f_get_info(c->argv[0], strlen(c->argv[0]));
   if (res < 0) {
     /* Check for deny/allow policy, if login acl present? */
   }
@@ -1452,7 +1473,7 @@ static int p0f_sess_init(void) {
 static conftable p0f_conftab[] = {
   { "P0FAllowFilter",	set_p0ffilter,		NULL },
   { "P0FDenyFilter",	set_p0ffilter,		NULL },
-  { "P0FCacheSize,	set_p0fcachesize,	NULL },
+  { "P0FCacheSize",	set_p0fcachesize,	NULL },
   { "P0FDevice",	set_p0fdevice,		NULL },
   { "P0FEngine",	set_p0fengine,		NULL },
   { "P0FLog",		set_p0flog,		NULL },
