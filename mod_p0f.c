@@ -21,8 +21,7 @@
  * resulting executable, without including the source code for OpenSSL in the
  * source distribution.
  *
- * DO NOT EDIT BELOW THIS LINE
- * $Archive: mod_p0f.a $
+ * --- DO NOT EDIT BELOW THIS LINE ---
  */
 
 #include "mod_p0f.h"
@@ -39,6 +38,35 @@ static const char *p0f_logname = NULL;
 static pid_t p0f_proc_pid;
 
 static const char *trace_channel = "p0f";
+
+/* The types of data that p0f provides, and that we care about. */
+static const char *p0f_os = NULL;
+static const char *p0f_os_details = NULL;
+static const char *p0f_network_distance = NULL;
+static const char *p0f_network_link = NULL;
+static const char *p0f_traffic_type = NULL;
+
+/* Names of supported P0F values */
+struct p0f_filter_key {
+  const char *filter_name;
+  int filter_id;
+};
+
+#define P0F_FILTER_KEY_OS		200
+#define P0F_FILTER_KEY_OS_DETAILS	201
+#define P0F_FILTER_KEY_NETWORK_DISTANCE	202
+#define P0F_FILTER_KEY_NETWORK_LINK	203
+#define P0F_FILTER_KEY_TRAFFIC_TYPE	204
+
+static struct p0f_filter_key p0f_filter_keys[] = {
+  "OS",			P0F_FILTER_KEY_OS,
+  "OSDetails",		P0F_FILTER_KEY_OS_DETAILS,
+  "NetworkDistance",	P0F_FILTER_KEY_NETWORK_DISTANCE,
+  "NetworkLink",	P0F_FILTER_KEY_NETWORK_LINK,
+  "TrafficType",	P0F_FILTER_KEY_TRAFFIC_TYPE,
+
+  { NULL, -1 }
+};
 
 /* The following are from the p0f-query.h header file that comes with the
  * p0f source code.  It is copied (in part) into here directly so that I can
@@ -113,9 +141,429 @@ struct p0f_info {
   const char *bpf_rule;
 };
 
+#define P0F_READ_MAX_ATTEMPTS	10
+
+static void p0f_set_value(const char *key, const char *value) {
+  int res;
+
+  res = pr_env_set(p0f_pool, key, value);
+  if (res < 0) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error setting %s environment variable: %s", key, strerror(errno));
+  }
+
+  res = pr_table_add_dup(session.notes, pstrdup(session.pool, key),
+    (char *) value, 0);
+  if (res < 0) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error adding %s session note: %s", key, strerror(errno));
+  }
+
+  pr_trace_msg(trace_channel, 3, "set %s = '%s', key, value);
+}
+
+static int p0f_set_info(struct p0f_response *resp) {
+
+  /* resp.genre */
+  if (resp->genre[0] != '\0') {
+    p0f_os = pstrndup(p0f_pool, resp->genre, sizeof(resp->genre));
+    p0f_set_value("P0F_OS", p0f_os);
+  }
+
+  /* resp.detail */
+  if (resp->detail[0] != '\0') {
+    p0f_os_details = pstrdup(p0f_pool, resp->detail, sizeof(resp->detail));
+    p0f_set_value("P0F_OS_DETAILS", p0f_os_details);
+  }
+
+  /* resp.distance */
+  if (resp->distance != -1) {
+    char buf[32];
+
+    memset(buf, '\0', sizeof(buf));
+    snprintf(buf, sizeof(buf)-1, "%u", resp->distance);
+
+    p0f_network_distance = pstrdup(p0f_pool, buf);
+    p0f_set_value("P0F_NETWORK_DISTANCE", p0f_network_distance);
+  }
+
+  /* resp.link */
+  if (resp->link[0] != '\0') {
+    p0f_network_link = pstrndup(p0f_pool, resp->link, sizeof(resp->link));
+    p0f_set_value("P0F_NETWORK_LINK", p0f_network_link);
+  }
+
+  /* resp.tos */
+  if (resp->tos[0] != '\0') {
+    p0f_traffic_type = pstrndup(p0f_pool, resp->tos, sizeof(resp->tos));
+    p0f_set_value("P0F_TRAFFIC_TYPE", p0f_traffic_type);
+  }
+
+  /* XXX Not currently reported:
+   *
+   *  resp.score
+   *  resp.fw
+   *  resp.nat
+   *  resp.real
+   *  resp.uptime
+   */
+
+  return 0;
+}
+
+static int p0f_get_info(void) {
+  unsigned int nattempts = 0;
+  int ok = FALSE, res, sockfd;
+  struct sockaddr_un sock;
+  struct p0f_query req;
+  struct p0f_response resp;
+
+  /* Open a Unix domain socket to the P0FSocket */
+  sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sockfd < 0) {
+    int xerrno = errno;
+
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error opening Unix domain socket: %s", strerror(xerrno));
+
+    errno = xerrno;
+    return -1;
+  }
+
+  memset(&sock, 0, sizeof(sock));
+  sock.sun_family = AF_UNIX;
+  sstrncpy(sock.sun_path, p0f_socket, p0f_socketlen);
+
+  res = connect(sockfd, (struct sockaddr *) &sock);
+  if (res < 0) {
+    int xerrno = errno;
+
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error connecting to Unix domain socket '%s': %s", p0f_socket,
+      strerror(xerrno));
+
+    (void) close(sockfd);
+    errno = xerrno;
+    return -1;
+  }
+
+  memset(&req, 0, sizeof(req));
+
+  req.magic = QUERY_MAGIC;
+  req.id = session.pid;
+  req.type = QTYPE_FINGERPRINT;
+
+  /* XXX This doesn't look like it will for IPv6 addresses.  Not sure whether
+   * p0f support queries using IPv6 addresses yet.
+   */
+  req.src_ad = *((uint32_t *) pr_netaddr_get_inaddr(session.c->remote_addr));
+  req.src_port = ntohs(pr_netaddr_get_port(session.c->remote_addr));;
+  req.dst_ad = *((uint32_t *) pr_netaddr_get_inaddr(session.c->local_addr));
+  req.dst_port = ntohs(pr_netaddr_get_port(session.c->local_addr));
+
+  res = write(sockfd, &req, sizeof(req));
+
+  /* XXX Do we need to worry about short writes? Probably not; these data are
+   * small enough to fit in the PIPE_BUF constant, right?
+   */
+  if (res != sizeof(req)) {
+    int xerrno = errno;
+
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error writing to Unix domain socket '%s': %s", p0f_socket,
+      strerror(xerrno));
+
+    (void) close(sockfd);
+    errno = xerrno;
+    return -1;
+  }
+
+  while (nattempts < P0F_READ_MAX_ATTEMPTS) {
+    pr_signals_handle();
+
+    memset(&resp, 0, sizeof(resp));
+    res = read(sock, &resp, sizeof(resp));
+
+    if (res != sizeof(resp)) {
+      int xerrno = errno;
+
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error reading from Unix domain socket '%s': %s", p0f_socket,
+        strerror(xerrno));
+  
+      (void) close(sockfd);
+      errno = xerrno;
+      return -1;
+    }
+
+    nattempts++;
+
+    if (resp.magic != QUERY_MAGIC) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "received bad response (wrong code) from p0f on Unix domain "
+        "socket '%s', ignoring", p0f_socket);
+      continue;
+    }
+
+    /* Check the request/response IDs; it's possible that p0f gave us the
+     * wrong response.  Not sure how often that happens, or how long we will
+     * want to wait for the correct response.
+     */
+    if (resp.id != req.id) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "received bad response (mismatched ID) from p0f on Unix domain "
+        "socket '%s', ignoring", p0f_socket);
+      continue;
+    }
+
+    ok = TRUE;
+    break;
+  }
+
+  /* Don't need the Unix domain socket open anymore. */
+  (void) close(sockfd);
+
+  if (ok) {
+    res = p0f_set_info(&resp);
+
+  } else {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "tried %u times unsuccessfully to query p0f process", nattempts);
+    errno = ENOENT;
+    res = -1;
+  }
+
+  return res;
+}
+
+static char **p0f_get_argv(struct p0f_info *pi, const char *name) {
+  array_header *argv_list;
+
+  argv_list = make_array(p0f_pool, 5, sizeof(char **));
+  *((char **) push_array(argv_list)) = name,
+
+  /* XXX Not sure whether these options should be hardcoded. */
+  *((char **) push_array(argv_list)) = "-qKU";
+
+  *((char **) push_array(argv_list)) = "-Q";
+  *((char **) push_array(argv_list)) = pi->sock_path;
+
+  if (pi->cache_size > 0) {
+    char buf[32];
+
+    memset(buf, '\0', sizeof(buf));
+    snprintf(buf, sizeof(buf)-1, "%u", pi->cache_size);
+
+    *((char **) push_array(argv_list)) = "-c";
+    *((char **) push_array(argv_list)) = pstrdup(p0f_pool, buf);
+  }
+
+  if (pi->sigs_path != NULL) {
+    *((char **) push_array(argv_list)) = "-f";
+    *((char **) push_array(argv_list)) = pi->sigs_path;
+  }
+
+  if (pi->device != NULL) {
+    *((char **) push_array(argv_list)) = "-i";
+    *((char **) push_array(argv_list)) = pi->device;
+  }
+
+  if (pi->log_path != NULL) {
+    *((char **) push_array(argv_list)) = "-o";
+    *((char **) push_array(argv_list)) = pi->log_path;
+  }
+
+  if (pi->user != NULL) {
+    *((char **) push_array(argv_list)) = "-u";
+    *((char **) push_array(argv_list)) = pi->user;
+  }
+
+  if (pi->bpf_rule != NULL) {
+    *((char **) push_array(argv_list)) = pi->bpf_rule;
+  }
+
+  /* Don't forget the terminating NULL. */
+  *((char **) push_array(argv_list)) = NULL;
+
+  return argv_list->elts;
+}
+
+static char **p0f_get_env(struct p0f_info *pi) {
+  array_header *env_list;
+
+  env_list = make_array(p0f_pool, 1, sizeof(char **));
+  *((char **) push_array(env_list)) = NULL;
+
+  return env_list->elts;
+}
+
+static void p0f_prepare_fds(void) {
+  int fd;
+  long nfiles = 0;
+  register unsigned int i = 0;
+  struct rlimit rlim;
+
+  /* Dup STDIN to /dev/null. */
+  fd = open("/dev/null", O_RDONLY);
+  if (fd < 0) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error: unable to open /dev/null for stdin: %s", strerror(errno));
+
+  } else {
+    if (dup2(fd, STDIN_FILENO) < 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error: unable to dup fd %d to stdin: %s", fd, strerror(errno));
+    }
+
+    (void) close(fd);
+  }
+
+  if (p0f_logfd >= 0) {
+    /* Dup STDOUT to p0f_logfd. */
+    if (dup2(p0f_logfd, STDOUT_FILENO) < 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error: unable to dup fd %d to stdout: %s", p0f_logfd, strerror(errno));
+    }
+
+  } else {
+    /* Dup STDOUT to /dev/null. */
+    fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error: unable to open /dev/null for stdout: %s", strerror(errno));
+
+    } else {
+      if (dup2(fd, STDOUT_FILENO) < 0) {
+        (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+          "error: unable to dup fd %d to stdout: %s", fd, strerror(errno));
+      }
+
+      (void) close(fd);
+    }
+  }
+
+  if (p0f_logfd >= 0) {
+    /* Dup STDERR to p0f_logfd. */
+    if (dup2(p0f_logfd, STDERR_FILENO) < 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error: unable to dup fd %d to stderr: %s", p0f_logfd, strerror(errno));
+    }
+
+  } else {
+    /* Dup STDERR to /dev/null. */
+    fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "error: unable to open /dev/null for stderr: %s", strerror(errno));
+
+    } else {
+      if (dup2(fd, STDERR_FILENO) < 0) {
+        (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+          "error: unable to dup fd %d to stderr: %s", fd, strerror(errno));
+      }
+
+      (void) close(fd);
+    }
+  }
+
+  /* Make sure not to pass on open file descriptors.  For stdin/stdout/stderr,
+   * we dup /dev/null.
+   *
+   * First, use getrlimit() to obtain the maximum number of open files
+   * for this process -- then close that number.
+   */
+#if defined(RLIMIT_NOFILE) || defined(RLIMIT_OFILE)
+# if defined(RLIMIT_NOFILE)
+  if (getrlimit(RLIMIT_NOFILE, &rlim) < 0) {
+# elif defined(RLIMIT_OFILE)
+  if (getrlimit(RLIMIT_OFILE, &rlim) < 0) {
+# endif
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "getrlimit() error: %s", strerror(errno));
+
+    /* Pick some arbitrary high number. */
+    nfiles = 1024;
+
+  } else {
+    nfiles = rlim.rlim_max;
+  }
+
+#else /* no RLIMIT_NOFILE or RLIMIT_OFILE */
+   nfiles = 1024;
+#endif
+
+  /* Yes, using a long for the nfiles variable is not quite kosher; it should
+   * be an unsigned type, otherwise a large limit (say, RLIMIT_INFINITY)
+   * might overflow the data type.  In that case, though, we want to know
+   * about it -- and using a signed type, we will know if the overflowed
+   * value is a negative number.  Chances are we do NOT want to be closing
+   * fds whose value is as high as they can possibly get; that's too many
+   * fds to iterate over.  Long story short, using a long int is just fine.
+   */
+
+  if (nfiles < 0) {
+    nfiles = 1024;
+  }
+
+  /* Close the "non-standard" file descriptors. */
+  for (i = 3; i < nfiles; i++) {
+
+    /* This is a potentially long-running loop, so handle signals. */
+    pr_signals_handle();
+
+    (void) close(i);
+  }
+
+  return;
+}
+
 static int p0f_exec(struct p0f_info *pi) {
-  errno = ENOSYS;
-  return -1;
+  register unsigned int i;
+  char **argv = NULL, **env = NULL, *path, *ptr;
+
+  /* Trim the given path to the command to execute to just the last
+   * component; this name will be the first argument to the executed
+   * command, as per execve(2) convention.
+   */
+  path = pi->p0f_path;
+  ptr = strrchr(path, '/');
+  if (ptr != NULL) {
+    path = ptr + 1;
+  }
+
+  argv = p0f_get_argv(pi, path);
+
+  (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+    "preparing to execute '%s':", pi->p0f_path);
+  for (i = 1; argv[i] != NULL; i++) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION, " argv[%u]: %s", i,
+      argv[i]);
+  }
+
+  env = p0f_get_env(pi);
+  p0f_prepare_fds();
+
+  errno = 0;
+
+  if (execve(pi->p0f_path, argv, env) < 0) {
+    if (p0f_logfd >= 0) {
+      /* We can do this, because stderr has been redirected to P0FLog.
+      fprintf(stderr, "%s: error executing '%s': %s", MOD_P0F_VERSION,
+        pi->p0f_path, strerror(errno));
+    }
+  }
+
+  /* Since all previous file descriptors (including those for log files)
+   * have been closed, and root privs have been revoked, there's little
+   * chance of directing a message of execve() failure to proftpd's log
+   * files.  execve() only returns if there's an error; the only way we
+   * can signal this to the waiting parent process is to exit with a
+   * non-zero value (the value of errno will do nicely).
+   */
+  exit(errno);
+
+  /* Never reached. */
+  return 0;
 }
 
 static pid_t p0f_start(struct p0f_info *pi) {
@@ -260,8 +708,351 @@ static void p0f_stop(pid_t p0f_pid) {
   return;
 }
 
+static const char *p0f_get_filter_name(int filter_id) {
+  register unsigned int i;
+
+  for (i = 0; p0f_filter_keys[i].filter_name != NULL; i++) {
+    if (p0f_filter_keys[i].filter_id == filter_id) {
+      return p0f_filter_keys[i].filter_name;
+    }
+  }
+
+  errno = ENOENT;
+  return NULL;
+}
+
+static const char *p0f_get_filter_value(int filter_id) {
+  switch (filter_id) {
+    case P0F_FILTER_KEY_OS:
+      if (p0f_os != NULL) {
+        return p0f_os;
+      }
+      break;
+
+    case P0F_FILTER_KEY_OS_DETAILS:
+      if (p0f_os_details != NULL) {
+        return p0f_os_details;
+      }
+      break;
+
+    case P0F_FILTER_KEY_NETWORK_DISTANCE:
+      if (p0f_network_distance != NULL) {
+        return p0f_network_distance;
+      }
+      break;
+
+    case P0F_FILTER_KEY_NETWORK_LINK:
+      if (p0f_network_link != NULL) {
+        return p0f_network_link;
+      }
+      break;
+
+    case P0F_FILTER_KEY_TRAFFIC_TYPE:
+      if (p0f_traffic_type != NULL) {
+        return p0f_traffic_type;
+      }
+      break;
+  }
+
+  errno = ENOENT;
+  return NULL;
+}
+
+static int p0f_check_filters(pool *p, char *path) {
+#if PR_USE_REGEX
+  config_rec *c;
+
+  c = find_config(get_dir_ctxt(p, path), CONF_PARAM, "P0FAllowFilter",
+    FALSE);
+  while (c) {
+    int filter_id, res;
+    pr_regex_t *filter_re;
+    const char *filter_name, *filter_pattern, *filter_value;
+
+    pr_signals_handle();
+
+    filter_id = *((int *) c->argv[0]);
+    filter_pattern = c->argv[1];
+    filter_re = c->argv[2];
+
+    filter_value = p0f_get_filter_value(filter_id);
+    if (filter_value == NULL) {
+      c = find_config_next(c, c->next, CONF_PARAM, "P0FAllowFilter", FALSE);
+      continue;
+    }
+
+    filter_name = p0f_get_filter_name(filter_id);
+
+    res = pr_regexp_exec(filter_re, filter_value, 0, NULL, 0, 0, 0);
+    pr_trace_msg(trace_channel, 12,
+      "%s filter value %s %s P0FAllowFilter pattern '%s'",
+      filter_name, filter_value, res == 0 ? "matched" : "did not match",
+      filter_pattern);
+
+    if (res != 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "%s filter value '%s' did not match P0FAllowFilter pattern '%s'",
+        filter_name, filter_value, filter_pattern);
+      return -1;
+    }
+
+    c = find_config_next(c, c->next, CONF_PARAM, "P0FAllowFilter", FALSE);
+  }
+
+  c = find_config(get_dir_ctxt(p, path), CONF_PARAM, "P0FDenyFilter",
+    FALSE);
+  while (c) {
+    int filter_id, res;
+    pr_regex_t *filter_re;
+    const char *filter_name, *filter_pattern, *filter_value;
+
+    pr_signals_handle();
+
+    filter_id = *((int *) c->argv[0]);
+    filter_pattern = c->argv[1];
+    filter_re = c->argv[2];
+
+    filter_value = p0f_get_filter_value(filter_id);
+    if (filter_value == NULL) {
+      c = find_config_next(c, c->next, CONF_PARAM, "P0FDenyFilter", FALSE);
+      continue;
+    }
+
+    filter_name = p0f_get_filter_name(filter_id);
+
+    res = pr_regexp_exec(filter_re, filter_value, 0, NULL, 0, 0, 0);
+    pr_trace_msg(trace_channel, 12,
+      "%s filter value %s %s P0FAllowFilter pattern '%s'",
+      filter_name, filter_value, res == 0 ? "matched" : "did not match",
+      filter_pattern);
+
+    if (res == 0) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "%s filter value '%s' matched P0FDenyFilter pattern '%s'",
+        filter_name, filter_value, filter_pattern);
+      return -1;
+    }
+
+    c = find_config_next(c, c->next, CONF_PARAM, "P0FDenyFilter", FALSE);
+  }
+#endif /* !HAVE_REGEX_H or !HAVE_REGCOMP */
+
+  return 0;
+}
+
+static char *p0f_get_path_skip_opts(cmd_rec *cmd) {
+  char *ptr, *path = NULL;
+
+  if (cmd->arg == NULL) {
+    errno = ENOENT;
+    return NULL;
+  }
+
+  ptr = path = cmd->arg;
+
+  while (isspace((int) *ptr)) {
+    pr_signals_handle();
+    ptr++;
+  }
+
+  if (*ptr == '-') {
+    /* Options are found; skip past the leading whitespace. */
+    path = ptr;
+  }
+
+  while (path &&
+         *path == '-') {
+
+    /* Advance to the next whitespace */
+    while (*path != '\0' &&
+           !isspace((int) *path)) {
+      path++;
+    }
+
+    ptr = path;
+
+    while (*ptr &&
+           isspace((int) *ptr)) {
+      pr_signals_handle();
+      ptr++;
+    }
+
+    if (*ptr == '-') {
+      /* Options are found; skip past the leading whitespace. */
+      path = ptr;
+
+    } else if (*(path + 1) == ' ') {
+      /* If the next character is a blank space, advance just one character. */
+      path++;
+      break;
+
+    } else {
+      path = ptr;
+      break;
+    }
+  }
+
+  return path;
+}
+
+static char *p0f_get_path(cmd_rec *cmd, const char *proto) {
+  char *path = NULL, *abs_path = NULL;
+
+  if (strncasecmp(proto, "ftp", 4) == 0 ||
+      strncasecmp(proto, "ftps", 5) == 0) {
+
+    if (pr_cmd_cmp(cmd, PR_CMD_LIST_ID) == 0 ||
+        pr_cmd_cmp(cmd, PR_CMD_NLST_ID) == 0) {
+      path = p0f_get_path_skip_opts(cmd);
+
+
+    } else {
+      path = cmd->arg;
+    }
+
+  } else if (strncasecmp(proto, "sftp", 5) == 0) {
+    path = cmd->arg;
+
+  } else {
+    pr_trace_msg(trace_channel, 1,
+      "unable to get path from command: unsupported protocol '%s'", proto);
+    errno = EINVAL;
+    return NULL;
+  }
+
+  abs_path = dir_abs_path(cmd->tmp_pool, path, TRUE);
+  if (abs_path == NULL) {
+    int xerrno = errno;
+
+    pr_trace_msg(trace_channel, 1, "error resolving '%s': %s", path,
+      strerror(xerrno));
+
+    errno = EINVAL;
+    return NULL;
+  }
+
+  pr_trace_msg(trace_channel, 17, "resolved path '%s' to '%s'", path, abs_path);
+  return abs_path;
+}
+
+static void p0f_set_error_response(cmd_rec *cmd, const char *msg) {
+  if (pr_cmd_cmp(cmd, PR_CMD_LIST_ID) == 0 ||
+      pr_cmd_cmp(cmd, PR_CMD_NLST_ID) == 0) {
+
+    /* We have may received bare LIST/NLST commands, or just options and no
+     * paths.  Do The Right Thing(tm) with these scenarios.
+     */
+
+    arglen = strlen(cmd->arg);
+    if (arglen == 0) {
+      /* No options, no path. */
+      pr_response_add_err(R_450, ".: %s", msg);
+
+    } else {
+      char *path;
+
+      path = p0f_get_path_skip_opts(cmd);
+
+      arglen = strlen(path);
+      if (arglen == 0) {
+        /* Only options, no path. */
+        pr_response_add_err(R_450, ".: %s", msg);
+
+      } else {
+        pr_response_add_err(R_450, "%s: %s", cmd->arg, msg);
+      }
+    }
+
+  } else if (pr_cmd_cmp(cmd, PR_CMD_MLSD_ID) == 0 ||
+             pr_cmd_cmp(cmd, PR_CMD_MLST_ID) == 0) {
+    size_t arglen;
+
+    arglen = strlen(cmd->arg);
+    if (arglen == 0) {
+
+      /* No path. */
+      pr_response_add_err(R_550, ".: %s", msg);
+
+    } else {
+      pr_response_add_err(R_550, "%s: %s", cmd->arg, msg);
+    }
+
+  } else if (pr_cmd_cmp(cmd, PR_CMD_STAT_ID) == 0) {
+    size_t arglen;
+
+    arglen = strlen(cmd->arg);
+    if (arglen == 0) {
+
+      /* No path. */
+      pr_response_add_err(R_550, "%s", msg);
+
+    } else {
+      pr_response_add_err(R_550, "%s: %s", cmd->arg, msg);
+    }
+
+  } else {
+    pr_response_add_err(R_550, "%s: %s", cmd->arg, msg);
+  }
+}
+
 /* Configuration handlers
  */
+
+/* usage: P0FAllowFilter key regex
+ *        P0FDenyFilter key regex
+ */
+MODRET set_p0ffilter(cmd_rec *cmd) {
+#if PR_USE_REGEX
+  register unsigned int i;
+  config_rec *c;
+  pr_regex_t *pre;
+  int filter_id = -1, res;
+
+  CHECK_ARGS(cmd, 2);
+  CHECK_CONF(cmd, CONF_DIR|CONF_DYNDIR);
+
+  /* Make sure a supported filter key was configured. */
+  for (i = 0; p0f_filter_keys[i].filter_name != NULL; i++) {
+    if (strcasecmp(cmd->argv[1], p0f_filter_keys[i].filter_name) == 0) {
+      filter_id = p0f_filter_keys[i].filter_id;
+      break;
+    }
+  }
+
+  if (filter_id == -1) {
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unknown ", cmd->argv[0],
+      " filter name '", cmd->argv[1], "'", NULL));
+  }
+
+  pre = pr_regexp_alloc(&p0f_module);
+
+  res = pr_regexp_compile(pre, cmd->argv[2], REG_EXTENDED|REG_NOSUB|REG_ICASE);
+  if (res != 0) {
+    char errstr[256];
+
+    memset(errstr, '\0', sizeof(errstr));
+    pr_regexp_error(res, pre, errstr, sizeof(errstr)-1);
+    pr_regexp_free(&p0f_module, pre);
+
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "pattern '", cmd->argv[2],
+      "' failed regex compilation: ", errstr, NULL));
+  }
+
+  c = add_config_param(cmd->argv[0], 3, NULL, NULL, NULL);
+  c->argv[0] = palloc(c->pool, sizeof(int));
+  *((int *) c->argv[0]) = filter_id;
+  c->argv[1] = pstrdup(c->pool, cmd->argv[2]);
+  c->argv[2] = pre;
+  c->flags |= CF_MERGEDOWN_MULTI;
+
+  return PR_HANDLED(cmd);
+
+#else /* no regular expression support at the moment */
+  CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "The ", cmd->argv[0],
+    " directive cannot be used on this system, as you do not have POSIX "
+    "compliant regex support", NULL));
+#endif
+}
 
 /* usage: P0FCacheSize size */
 MODRET set_p0fcachesize(cmd_rec *cmd) {
@@ -407,35 +1198,23 @@ MODRET set_p0fuser(cmd_rec *cmd) {
 /* Command handlers
  */
 
-MODRET snmp_pre_list(cmd_rec *cmd) {
+MODRET snmp_pre_cmd(cmd_rec *cmd) {
+  const char *proto;
+  char *abs_path;
+  int res;
 
   if (p0f_engine == FALSE) {
     return PR_DECLINED(cmd);
   }
 
-  /* Check abs path against signature whitelist/pattern, if any. */
+  proto = pr_session_get_protocol(0);
+  abs_path = p0f_get_path(cmd, proto);
 
-  return PR_DECLINED(cmd);
-}
-
-MODRET snmp_pre_retr(cmd_rec *cmd) {
-
-  if (p0f_engine == FALSE) {
-    return PR_DECLINED(cmd);
+  res = p0f_check_filters(cmd->tmp_pool, abs_path);
+  if (res < 0) {
+    p0f_set_error_response(cmd, strerror(EACCES));
+    return PR_ERROR(cmd);
   }
-
-  /* Check abs path against signature whitelist/pattern, if any. */
-
-  return PR_DECLINED(cmd);
-}
-
-MODRET snmp_pre_stor(cmd_rec *cmd) {
-
-  if (p0f_engine == FALSE) {
-    return PR_DECLINED(cmd);
-  }
-
-  /* Check abs path against signature whitelist/pattern, if any. */
 
   return PR_DECLINED(cmd);
 }
@@ -464,9 +1243,7 @@ static void p0f_mod_unload_ev(const void *event_data, void *user_data) {
 #endif
 
 static void p0f_postparse_ev(const void *event_data, void *user_data) {
-  register unsigned int i;
   config_rec *c;
-  server_rec *s;
   int res;
 
   c = find_config(main_server->conf, CONF_PARAM, "P0FEngine", FALSE);
@@ -512,13 +1289,14 @@ static void p0f_postparse_ev(const void *event_data, void *user_data) {
     }
   }
 
-  /* Iterate through the server_list, and count up the number of vhosts. */
-  for (s = (server_rec *) server_list->xas_list; s; s = s->next) {
-
-    /* XXX Determine the device(s) needed, and ports, to build up the BPF
-     * rule.
-     */
+  c = find_config(main_server->conf, CONF_PARAM, "P0FSocket", FALSE);
+  if (c == NULL) {
+    pr_log_pri(PR_LOG_NOTICE, MOD_P0F_VERSION
+      ": notice: missing required P0FSocket directive, disabling module");
+    p0f_engine = FALSE;
+    return;
   }
+
 }
 
 static void p0f_restart_ev(const void *event_data, void *user_data) {
@@ -531,8 +1309,6 @@ static void p0f_restart_ev(const void *event_data, void *user_data) {
 }
 
 static void p0f_shutdown_ev(const void *event_data, void *user_data) {
-  register unsigned int i;
-
   p0f_stop(p0f_proc_pid);
 
   destroy_pool(p0f_pool);
@@ -545,8 +1321,10 @@ static void p0f_shutdown_ev(const void *event_data, void *user_data) {
 }
 
 static void p0f_startup_ev(const void *event_data, void *user_data) {
-  config_rec *c;
   struct p0f_info pi;
+  config_rec *c;
+  server_rec *s;
+  char *bpf_rule = "";
 
   if (p0f_engine == FALSE) {
     return;
@@ -558,6 +1336,64 @@ static void p0f_startup_ev(const void *event_data, void *user_data) {
       ": cannot support p0f for ServerType inetd, disabling module");
     return;
   }
+
+  memset(&pi, 0, sizeof(pi));
+
+  /* Get all of the p0f info for running the process. */
+  pi.p0f_path = "p0f";
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FPath", FALSE);
+  if (c != NULL) {
+    pi.p0f_path = c->argv[0];
+  }
+
+  if (p0f_logfd >= 0) {
+    pi.log_path = p0f_logname;
+  }
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FSocket", FALSE);
+  if (c == NULL) {
+    pr_log_debug(DEBUG0, MOD_P0F_VERSION
+      ": missing required P0FSocket directive, disabling module");
+    p0f_engine = FALSE;
+    return;
+  }
+  pi.sock_path = c->argv[0];
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FSignatures", FALSE);
+  if (c != NULL) {
+    pi.sigs_path = c->argv[0];
+  }
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FDevice", FALSE);
+  if (c != NULL) {
+    pi.device = c->argv[0];
+  }
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FUser", FALSE);
+  if (c != NULL) {
+    pi.user = c->argv[0];
+  }
+
+  c = find_config(main_server->conf, CONF_PARAM, "P0FCacheSize", FALSE);
+  if (c != NULL) {
+    pi.cache_size = *((unsigned int *) c->argv[0]);
+  }
+
+  /* Iterate through the server_list, and build up the BPF filter expression,
+   * based on the ports on which proftpd is listening.
+   */
+  for (s = (server_rec *) server_list->xas_list; s; s = s->next) {
+    char buf[32];
+
+    memset(buf, '\0', sizeof(buf));
+    snprintf(buf, sizeof(buf)-1, "%u", s->ServerPort);
+
+    bpf_rule = pstrcat(p0f_pool, bpf_rule,
+      *bpf_rule ? "or dst port " : "dst port ", buf, NULL);
+  }
+
+  pi.bpf_rule = bpf_rule;
 
   p0f_proc_pid = p0f_start(&pi);
   if (p0f_proc_pid == 0) {
@@ -602,7 +1438,7 @@ static int p0f_sess_init(void) {
   }
 
   /* Call to p0f process, fill in notes/env vars, check ACL patterns */
-  res = p0f_query();
+  res = p0f_get_info();
   if (res < 0) {
     /* Check for deny/allow policy, if login acl present? */
   }
@@ -614,6 +1450,8 @@ static int p0f_sess_init(void) {
  */
 
 static conftable p0f_conftab[] = {
+  { "P0FAllowFilter",	set_p0ffilter,		NULL },
+  { "P0FDenyFilter",	set_p0ffilter,		NULL },
   { "P0FCacheSize,	set_p0fcachesize,	NULL },
   { "P0FDevice",	set_p0fdevice,		NULL },
   { "P0FEngine",	set_p0fengine,		NULL },
@@ -626,13 +1464,13 @@ static conftable p0f_conftab[] = {
 };
 
 static cmdtable p0f_cmdtab[] = {
-  { PRE_CMD,		C_LIST,	G_NONE,	p0f_pre_list,	FALSE,	FALSE },
-  { PRE_CMD,		C_MLSD,	G_NONE,	p0f_pre_list,	FALSE,	FALSE },
-  { PRE_CMD,		C_MLST,	G_NONE,	p0f_pre_list,	FALSE,	FALSE },
-  { PRE_CMD,		C_NLST,	G_NONE,	p0f_pre_list,	FALSE,	FALSE },
-
-  { PRE_CMD,		C_RETR,	G_NONE,	p0f_pre_retr,	FALSE,	FALSE },
-  { PRE_CMD,		C_STOR,	G_NONE,	p0f_pre_stor,	FALSE,	FALSE },
+  { PRE_CMD,		C_LIST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_MLSD,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_MLST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_NLST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_RETR,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_STAT,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_STOR,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
 
   { 0, NULL }
 };
