@@ -3,3 +3,11 @@ clients which connect to the proftpd daemon.  The fingerprint data are
 exposed for use via notes and environment variables.
 
 For further module documentation, see mod_p0f.html.
+
+Future Feature Ideas:
+
+  P0FPolicy
+    Configure the default allow/deny policy, for when no matching P0F*Filter
+    is configured
+
+  Properly handle proftpd restarts/SIGHUPs by stop/starting p0f process
