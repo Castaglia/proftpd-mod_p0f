@@ -1464,12 +1464,17 @@ static conftable p0f_conftab[] = {
 };
 
 static cmdtable p0f_cmdtab[] = {
+  { PRE_CMD,		C_APPE,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_DELE,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_LIST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_MLSD,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_MLST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_NLST,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_RETR,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_RNFR,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_RNTO,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_STAT,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
+  { PRE_CMD,		C_SIZE,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
   { PRE_CMD,		C_STOR,	G_NONE,	p0f_pre_cmd,	FALSE,	FALSE },
 
   { 0, NULL }
