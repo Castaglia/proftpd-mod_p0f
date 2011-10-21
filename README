@@ -11,3 +11,5 @@ Future Feature Ideas:
     is configured
 
   Properly handle proftpd restarts/SIGHUPs by stop/starting p0f process
+
+  SFTP/SCP unit tests
