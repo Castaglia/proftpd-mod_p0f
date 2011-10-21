@@ -37,6 +37,9 @@ static int p0f_engine = FALSE;
 static const char *p0f_logname = NULL;
 static pid_t p0f_proc_pid;
 
+static unsigned long p0f_opts = 0UL;
+#define P0F_OPT_VERBOSE_LOGGING		0x001
+
 /* Number of seconds to wait for the p0f process to stop before we terminate
  * it with extreme prejudice.
  *
@@ -177,6 +180,9 @@ static int p0f_set_info(struct p0f_response *resp) {
     p0f_os = pstrndup(p0f_pool, (const char *) resp->genre,
       sizeof(resp->genre));
     p0f_set_value("P0F_OS", p0f_os);
+
+  } else {
+    pr_trace_msg(trace_channel, 15, "%s", "no p0f genre/OS data available");
   }
 
   /* resp.detail */
@@ -184,6 +190,10 @@ static int p0f_set_info(struct p0f_response *resp) {
     p0f_os_details = pstrndup(p0f_pool, (const char *) resp->detail,
       sizeof(resp->detail));
     p0f_set_value("P0F_OS_DETAILS", p0f_os_details);
+
+  } else {
+    pr_trace_msg(trace_channel, 15, "%s",
+      "no p0f detail/OSDetails data available");
   }
 
   /* resp.distance */
@@ -195,6 +205,10 @@ static int p0f_set_info(struct p0f_response *resp) {
 
     p0f_network_distance = pstrdup(p0f_pool, buf);
     p0f_set_value("P0F_NETWORK_DISTANCE", p0f_network_distance);
+
+  } else {
+    pr_trace_msg(trace_channel, 15, "%s",
+      "no p0f distance/NetworkDistance data available");
   }
 
   /* resp.link */
@@ -202,6 +216,10 @@ static int p0f_set_info(struct p0f_response *resp) {
     p0f_network_link = pstrndup(p0f_pool, (const char *) resp->link,
       sizeof(resp->link));
     p0f_set_value("P0F_NETWORK_LINK", p0f_network_link);
+
+  } else {
+    pr_trace_msg(trace_channel, 15, "%s",
+      "no p0f link/NetworkLink data available");
   }
 
   /* resp.tos */
@@ -209,6 +227,10 @@ static int p0f_set_info(struct p0f_response *resp) {
     p0f_traffic_type = pstrndup(p0f_pool, (const char *) resp->tos,
       sizeof(resp->tos));
     p0f_set_value("P0F_TRAFFIC_TYPE", p0f_traffic_type);
+
+  } else {
+    pr_trace_msg(trace_channel, 15, "%s",
+      "no p0f tos/TrafficType data available");
   }
 
   /* XXX Not currently reported:
@@ -223,9 +245,10 @@ static int p0f_set_info(struct p0f_response *resp) {
   return 0;
 }
 
-static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
+static int p0f_get_info(const char *p0f_socket) {
   unsigned int nattempts = 0;
   int ok = FALSE, res, sockfd;
+  struct in_addr *addr;
   struct sockaddr_un sock;
   struct p0f_query req;
   struct p0f_response resp;
@@ -244,7 +267,9 @@ static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
 
   memset(&sock, 0, sizeof(sock));
   sock.sun_family = AF_UNIX;
-  sstrncpy(sock.sun_path, p0f_socket, p0f_socketlen);
+
+  /* Make sure we copy the trailing NUL, too. */
+  sstrncpy(sock.sun_path, p0f_socket, sizeof(sock.sun_path));
 
   res = connect(sockfd, (struct sockaddr *) &sock, sizeof(sock));
   if (res < 0) {
@@ -268,10 +293,16 @@ static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
   /* XXX This doesn't look like it will for IPv6 addresses.  Not sure whether
    * p0f support queries using IPv6 addresses yet.
    */
-  req.src_ad = *((uint32_t *) pr_netaddr_get_inaddr(session.c->remote_addr));
-  req.src_port = ntohs(pr_netaddr_get_port(session.c->remote_addr));;
-  req.dst_ad = *((uint32_t *) pr_netaddr_get_inaddr(session.c->local_addr));
-  req.dst_port = ntohs(pr_netaddr_get_port(session.c->local_addr));
+  addr = (struct in_addr *) pr_netaddr_get_inaddr(session.c->remote_addr);
+  req.src_ad = addr->s_addr;
+  req.src_port = session.c->remote_port;
+
+  addr = (struct in_addr *) pr_netaddr_get_inaddr(session.c->local_addr);
+  req.dst_ad = addr->s_addr;
+  req.dst_port = session.c->local_port;
+
+  pr_trace_msg(trace_channel, 15,
+    "p0f query: src addr = %lu (%s), src port = %u, dst addr = %lu, dst port = %u", (unsigned long) req.src_ad, session.c->remote_name, (unsigned int) req.src_port, (unsigned long) req.dst_ad, (unsigned int) req.dst_port);
 
   res = write(sockfd, &req, sizeof(req));
 
@@ -328,6 +359,19 @@ static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
       continue;
     }
 
+    if (resp.type == RESP_BADQUERY) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "received 'bad query' response from p0f on Unix domain socket '%s'",
+        p0f_socket);
+      break;
+
+    } else if (resp.type == RESP_NOMATCH) {
+      (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+        "received 'no match' response from p0f on Unix domain socket '%s'",
+        p0f_socket);
+      break;
+    }
+
     ok = TRUE;
     break;
   }
@@ -336,11 +380,14 @@ static int p0f_get_info(const char *p0f_socket, size_t p0f_socketlen) {
   (void) close(sockfd);
 
   if (ok) {
+    pr_trace_msg(trace_channel, 15, "%s",
+      "successfully queried p0f process for info");
     res = p0f_set_info(&resp);
 
   } else {
     (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
-      "tried %u times unsuccessfully to query p0f process", nattempts);
+      "tried %u %s unsuccessfully to query p0f process", nattempts,
+      nattempts != 1 ? "times" : "time");
     errno = ENOENT;
     res = -1;
   }
@@ -354,8 +401,10 @@ static char **p0f_get_argv(struct p0f_info *pi, char *name) {
   argv_list = make_array(p0f_pool, 5, sizeof(char **));
   *((char **) push_array(argv_list)) = name;
 
-  /* XXX Not sure whether these options should be hardcoded. */
-  *((char **) push_array(argv_list)) = "-qKU";
+  if (!(p0f_opts & P0F_OPT_VERBOSE_LOGGING)) {
+    /* XXX Not sure whether these options should be hardcoded. */
+    *((char **) push_array(argv_list)) = "-qKU";
+  }
 
   *((char **) push_array(argv_list)) = "-Q";
   *((char **) push_array(argv_list)) = pi->sock_path;
@@ -555,12 +604,17 @@ static int p0f_exec(struct p0f_info *pi) {
   env = p0f_get_env(pi);
   p0f_prepare_fds();
 
+  /* Switch to a permissive umask, so that the query socket that p0f
+   * creates will be usable by the session processes.
+   */
+  umask(000);
+
   errno = 0;
 
   if (execve(pi->p0f_path, argv, env) < 0) {
     if (p0f_logfd >= 0) {
       /* We can do this, because stderr has been redirected to P0FLog. */
-      fprintf(stderr, "%s: error executing '%s': %s", MOD_P0F_VERSION,
+      fprintf(stderr, "%s: error executing '%s': %s\n", MOD_P0F_VERSION,
         pi->p0f_path, strerror(errno));
     }
   }
@@ -1150,6 +1204,31 @@ MODRET set_p0fpath(cmd_rec *cmd) {
   return PR_HANDLED(cmd);
 }
 
+/* usage: P0FOptions opt1 ... optN */
+MODRET set_p0foptions(cmd_rec *cmd) {
+  register unsigned int i;
+  unsigned long opts = 0UL;
+  config_rec *c;
+
+  CHECK_CONF(cmd, CONF_ROOT);
+
+  for (i = 1; i < cmd->argc; i++) {
+    if (strncasecmp(cmd->argv[i], "VerboseLogging", 15) == 0) {
+      opts |= P0F_OPT_VERBOSE_LOGGING;
+
+    } else {
+      CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unknown P0FOption '",
+        cmd->argv[i], "'", NULL));
+    }
+  }
+
+  c = add_config_param(cmd->argv[0], 1, NULL);
+  c->argv[0] = palloc(c->pool, sizeof(unsigned long));
+  *((unsigned long *) c->argv[0]) = opts;
+
+  return PR_HANDLED(cmd);
+}
+
 /* usage: P0FSignatures /path/to/p0f.fp */
 MODRET set_p0fsignatures(cmd_rec *cmd) {
   int res;
@@ -1307,6 +1386,10 @@ static void p0f_postparse_ev(const void *event_data, void *user_data) {
     return;
   }
 
+  c = find_config(main_server->conf, CONF_PARAM, "P0FOptions", FALSE);
+  if (c != NULL) {
+    p0f_opts = *((unsigned long *) c->argv[0]);
+  }
 }
 
 static void p0f_restart_ev(const void *event_data, void *user_data) {
@@ -1458,10 +1541,19 @@ static int p0f_sess_init(void) {
     return 0;
   }
 
+  /* XXX p0f's query socket API does not support IPv6 connections currently */
+  if (pr_netaddr_get_family(session.c->remote_addr) != AF_INET) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION, "%s",
+      "unable to support IPv6 connections");
+    p0f_engine = FALSE;
+    return 0;
+  }
+
   /* Call to p0f process, fill in notes/env vars, check ACL patterns */
-  res = p0f_get_info(c->argv[0], strlen(c->argv[0]));
+  res = p0f_get_info(c->argv[0]);
   if (res < 0) {
-    /* Check for deny/allow policy, if login acl present? */
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error getting p0f info for connected client: %s", strerror(errno));
   }
 
   return 0;
@@ -1478,6 +1570,7 @@ static conftable p0f_conftab[] = {
   { "P0FEngine",	set_p0fengine,		NULL },
   { "P0FLog",		set_p0flog,		NULL },
   { "P0FPath",		set_p0fpath,		NULL },
+  { "P0FOptions",	set_p0foptions,		NULL },
   { "P0FSignatures",	set_p0fsignatures,	NULL },
   { "P0FSocket",	set_p0fsocket,		NULL },
   { "P0FUser",		set_p0fuser,		NULL },
