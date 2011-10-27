@@ -663,8 +663,8 @@ static pid_t p0f_start(struct p0f_info *pi) {
   PRIVS_ROOT
 
   if (p0f_exec(pi) < 0) {
-    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION
-      ": error executing p0f: %s", strerror(errno));
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION,
+      "error executing p0f: %s", strerror(errno));
   }
 
   /* When we are done, we simply exit. */;
