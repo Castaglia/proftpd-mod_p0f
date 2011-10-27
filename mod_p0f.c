@@ -821,22 +821,38 @@ static const char *p0f_get_filter_value(int filter_id) {
   return NULL;
 }
 
-static int p0f_check_filters(pool *p, char *path) {
+static int p0f_check_filters(cmd_rec *cmd, char *path) {
 #if PR_USE_REGEX
   config_rec *c;
 
-  c = find_config(get_dir_ctxt(p, path), CONF_PARAM, "P0FAllowFilter",
-    FALSE);
+  c = find_config(get_dir_ctxt(cmd->tmp_pool, path), CONF_PARAM,
+    "P0FAllowFilter", FALSE);
   while (c) {
-    int filter_id, res;
+    int filter_id, matched_cmd = FALSE, res;
     pr_regex_t *filter_re;
+    char **cmdlist, *xfer_cmd;
     const char *filter_name, *filter_pattern, *filter_value;
 
     pr_signals_handle();
 
-    filter_id = *((int *) c->argv[0]);
-    filter_pattern = c->argv[1];
-    filter_re = c->argv[2];
+    cmdlist = (char **) c->argv[0];
+
+    /* First, check the command list. */
+    for (xfer_cmd = *cmdlist; xfer_cmd; xfer_cmd = *(cmdlist++)) {
+      if (strcasecmp(xfer_cmd, cmd->argv[0]) == 0) {
+        matched_cmd = TRUE;
+        break;
+      }
+    }
+
+    if (matched_cmd == FALSE) {
+      c = find_config_next(c, c->next, CONF_PARAM, "P0FAllowFilter", FALSE);
+      continue;
+    }
+
+    filter_id = *((int *) c->argv[1]);
+    filter_pattern = c->argv[2];
+    filter_re = c->argv[3];
 
     filter_value = p0f_get_filter_value(filter_id);
     if (filter_value == NULL) {
@@ -862,18 +878,34 @@ static int p0f_check_filters(pool *p, char *path) {
     c = find_config_next(c, c->next, CONF_PARAM, "P0FAllowFilter", FALSE);
   }
 
-  c = find_config(get_dir_ctxt(p, path), CONF_PARAM, "P0FDenyFilter",
-    FALSE);
+  c = find_config(get_dir_ctxt(cmd->tmp_pool, path), CONF_PARAM,
+    "P0FDenyFilter", FALSE);
   while (c) {
-    int filter_id, res;
+    int filter_id, matched_cmd = FALSE, res;
     pr_regex_t *filter_re;
+    char **cmdlist, *xfer_cmd;
     const char *filter_name, *filter_pattern, *filter_value;
 
     pr_signals_handle();
 
-    filter_id = *((int *) c->argv[0]);
-    filter_pattern = c->argv[1];
-    filter_re = c->argv[2];
+    /* First, check the command list. */
+    cmdlist = (char **) c->argv[0];
+
+    for (xfer_cmd = *cmdlist; xfer_cmd; xfer_cmd = *(cmdlist++)) {
+      if (strcasecmp(xfer_cmd, cmd->argv[0]) == 0) {
+        matched_cmd = TRUE;
+        break;
+      }
+    }
+
+    if (matched_cmd == FALSE) {
+      c = find_config_next(c, c->next, CONF_PARAM, "P0FDenyFilter", FALSE);
+      continue;
+    }
+
+    filter_id = *((int *) c->argv[1]);
+    filter_pattern = c->argv[2];
+    filter_re = c->argv[3];
 
     filter_value = p0f_get_filter_value(filter_id);
     if (filter_value == NULL) {
@@ -1059,11 +1091,89 @@ static void p0f_set_error_response(cmd_rec *cmd, const char *msg) {
   }
 }
 
+static char *p0f_get_cmd_from_list(char **list) {
+  char *res = NULL, *dst = NULL;
+  unsigned char quote_mode = FALSE;
+
+  while (**list && isspace((int) **list)) {
+    pr_signals_handle();
+    (*list)++;
+  }
+
+  if (!**list)
+    return NULL;
+
+  res = dst = *list;
+
+  if (**list == '\"') {
+    quote_mode = TRUE;
+    (*list)++;
+  }
+
+  while (**list && **list != ',' &&
+      (quote_mode ? (**list != '\"') : (!isspace((int) **list)))) {
+
+    pr_signals_handle();
+
+    if (**list == '\\' && quote_mode) {
+
+      /* escaped char */
+      if (*((*list) + 1))
+        *dst = *(++(*list));
+    }
+
+    *dst++ = **list;
+    ++(*list);
+  }
+
+  if (**list)
+    (*list)++;
+
+  *dst = '\0';
+
+  return res;
+}
+
+static int p0f_parse_cmdlist(const char *name, config_rec *c, char *cmdlist) {
+  char *cmd = NULL;
+  array_header *cmds = NULL;
+
+  /* Allocate an array_header. */
+  cmds = make_array(c->pool, 0, sizeof(char *));
+
+  /* Add each command to the array, checking for invalid commands or
+   * duplicates.
+   */
+  while ((cmd = p0f_get_cmd_from_list(&cmdlist)) != NULL) {
+    pr_signals_handle();
+
+    /* Is the given command a valid one for this directive? */
+    if (strcasecmp(cmd, C_APPE) != 0 &&
+        strcasecmp(cmd, C_RETR) != 0 &&
+        strcasecmp(cmd, C_STOR) != 0 &&
+        strcasecmp(cmd, C_STOU) != 0) {
+      pr_log_debug(DEBUG0, "invalid %s command: %s", name, cmd);
+      errno = EINVAL;
+      return -1;
+    }
+
+    *((char **) push_array(cmds)) = pstrdup(c->pool, cmd);
+  }
+
+  /* Terminate the array with a NULL. */
+  *((char **) push_array(cmds)) = NULL;
+
+  /* Store the array of commands in the config_rec. */
+  c->argv[0] = (void *) cmds->elts;
+
+  return 0;
+}
+
 /* Configuration handlers
  */
 
-/* usage: P0FAllowFilter key regex
- *        P0FDenyFilter key regex
+/* usage: P0FAllowFilter cmds key regex
+ *        P0FDenyFilter cmds key regex
  */
 MODRET set_p0ffilter(cmd_rec *cmd) {
 #if PR_USE_REGEX
@@ -1072,12 +1182,18 @@ MODRET set_p0ffilter(cmd_rec *cmd) {
   pr_regex_t *pre;
   int filter_id = -1, res;
 
-  CHECK_ARGS(cmd, 2);
+  CHECK_ARGS(cmd, 3);
   CHECK_CONF(cmd, CONF_DIR|CONF_DYNDIR);
+
+  c = add_config_param(cmd->argv[0], 4, NULL, NULL, NULL, NULL);
+
+  if (p0f_parse_cmdlist(cmd->argv[0], c, cmd->argv[1]) < 0) {
+    CONF_ERROR(cmd, "error with command list");
+  }
 
   /* Make sure a supported filter key was configured. */
   for (i = 0; p0f_filter_keys[i].filter_name != NULL; i++) {
-    if (strcasecmp(cmd->argv[1], p0f_filter_keys[i].filter_name) == 0) {
+    if (strcasecmp(cmd->argv[2], p0f_filter_keys[i].filter_name) == 0) {
       filter_id = p0f_filter_keys[i].filter_id;
       break;
     }
@@ -1085,12 +1201,12 @@ MODRET set_p0ffilter(cmd_rec *cmd) {
 
   if (filter_id == -1) {
     CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unknown ", cmd->argv[0],
-      " filter name '", cmd->argv[1], "'", NULL));
+      " filter name '", cmd->argv[2], "'", NULL));
   }
 
   pre = pr_regexp_alloc(&p0f_module);
 
-  res = pr_regexp_compile(pre, cmd->argv[2], REG_EXTENDED|REG_NOSUB|REG_ICASE);
+  res = pr_regexp_compile(pre, cmd->argv[3], REG_EXTENDED|REG_NOSUB|REG_ICASE);
   if (res != 0) {
     char errstr[256];
 
@@ -1098,15 +1214,14 @@ MODRET set_p0ffilter(cmd_rec *cmd) {
     pr_regexp_error(res, pre, errstr, sizeof(errstr)-1);
     pr_regexp_free(&p0f_module, pre);
 
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "pattern '", cmd->argv[2],
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "pattern '", cmd->argv[3],
       "' failed regex compilation: ", errstr, NULL));
   }
 
-  c = add_config_param(cmd->argv[0], 3, NULL, NULL, NULL);
-  c->argv[0] = palloc(c->pool, sizeof(int));
-  *((int *) c->argv[0]) = filter_id;
-  c->argv[1] = pstrdup(c->pool, cmd->argv[2]);
-  c->argv[2] = pre;
+  c->argv[1] = palloc(c->pool, sizeof(int));
+  *((int *) c->argv[1]) = filter_id;
+  c->argv[2] = pstrdup(c->pool, cmd->argv[2]);
+  c->argv[3] = pre;
   c->flags |= CF_MERGEDOWN_MULTI;
 
   return PR_HANDLED(cmd);
@@ -1299,7 +1414,7 @@ MODRET p0f_pre_cmd(cmd_rec *cmd) {
   proto = pr_session_get_protocol(0);
   abs_path = p0f_get_path(cmd, proto);
 
-  res = p0f_check_filters(cmd->tmp_pool, abs_path);
+  res = p0f_check_filters(cmd, abs_path);
   if (res < 0) {
     p0f_set_error_response(cmd, strerror(EACCES));
     return PR_ERROR(cmd);
@@ -1532,19 +1647,19 @@ static int p0f_sess_init(void) {
     return 0;
   }
 
+  /* XXX p0f's query socket API does not support IPv6 connections currently */
+  if (pr_netaddr_get_family(session.c->remote_addr) != AF_INET) {
+    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION, "%s",
+      "unable to support IPv6 connections");
+    p0f_engine = FALSE;
+    return 0;
+  }
+
   c = find_config(main_server->conf, CONF_PARAM, "P0FSocket", FALSE);
   if (c == NULL) {
     /* XXX This shouldn't happen; the lack of a P0FSocket directive should
      * have been caught earlier.
      */
-    p0f_engine = FALSE;
-    return 0;
-  }
-
-  /* XXX p0f's query socket API does not support IPv6 connections currently */
-  if (pr_netaddr_get_family(session.c->remote_addr) != AF_INET) {
-    (void) pr_log_writefile(p0f_logfd, MOD_P0F_VERSION, "%s",
-      "unable to support IPv6 connections");
     p0f_engine = FALSE;
     return 0;
   }
