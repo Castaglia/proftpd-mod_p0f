@@ -1,0 +1,250 @@
+<!-- $Id: mod_snmp.html,v 1.3 2011/10/19 17:16:52 tj Exp tj $ -->
+<!-- $Source: /home/tj/proftpd/modules/doc/RCS/mod_snmp.html,v $ -->
+
+<html>
+<head>
+<title>ProFTPD module mod_p0f</title>
+</head>
+
+<body bgcolor=white>
+
+<hr>
+<center>
+<h2><b>ProFTPD module <code>mod_p0f</code></b></h2>
+</center>
+<hr><br>
+
+<p>
+The <code>mod_p0f</code> module uses the
+<a href="http://lcamtuf.coredump.cx/p0f.shtml"><code>p0f</code></a> tool
+for obtaining passive "fingerprint" of the connecting client system.  This
+fingerprint information can then be used to configure directory/file ACLs.
+
+<p>
+The <code>mod_p0f</code> module is contained in the <code>mod_p0f.c</code>
+file, is intended for ProFTPD 1.3.4rc3 and later, and is not compiled by
+default.  Installation instructions are discussed
+<a href="#Installation">here</a>.
+
+<p>
+The most current version of <code>mod_p0f</code> can be found at:
+<pre>
+  <a href="http://www.castaglia.org/proftpd/">http://www.castaglia.org/proftpd/</a>
+</pre>
+
+<h2>Author</h2>
+<p>
+Please contact TJ Saunders &lt;tj <i>at</i> castaglia.org&gt; with any
+questions, concerns, or suggestions regarding this module.
+
+<h2>Directives</h2>
+<ul>
+  <li><a href="#P0FAllowFilter">P0FAllowFilter</a>
+  <li><a href="#P0FDenyFilter">P0FDenyFilter</a>
+  <li><a href="#P0FCacheSize">P0FCacheSize</a>
+  <li><a href="#P0FDevice">P0FDevice</a>
+  <li><a href="#P0FEngine">P0FEngine</a>
+  <li><a href="#P0FLog">P0FLog</a>
+  <li><a href="#P0FOptions">P0FOptions</a>
+  <li><a href="#P0FSignatures">P0FSignatures</a>
+  <li><a href="#P0FSocket">P0FSocket</a>
+  <li><a href="#P0FUser">P0FUser</a>
+</ul>
+
+<p>
+<hr>
+<h2><a name="SNMPAgent">SNMPAgent</a></h2>
+<strong>Syntax:</strong> SNMPAgent master|agentx <em>ip-address</em> <em>port</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>SNMPAgent</code> directive configures the <code>mod_snmp</code>
+module to act as a "master" SNMP agent/entity, or as an AgentX sub-agent.
+(<b>Note</b> that the AgentX capability is not currently implemented.)
+
+<p>
+The <em>ip-address</em> and <em>port</em> parameters configure the address/port
+on which <code>mod_snmp</code> will listen for UDP SNMP packets.
+
+<p>
+Note that the <code>SNMPAgent</code> diretive is <b>required</b>.
+
+<p>
+<hr>
+<h2><a name="SNMPCommunity">SNMPCommunity</a></h2>
+<strong>Syntax:</strong> SNMPCommunity <em>community</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_snmp<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>SNMPCommunity</code> directive configures the <em>community</em>
+string (effectively a passphrase) used for authenticating SNMPv1 and SNMPv2
+messages.
+
+<p>
+Note that the <code>SNMPCommunity</code> diretive is <b>required</b>.
+
+<p>
+<hr>
+<h2><a name="P0FEngine">P0FEngine</a></h2>
+<strong>Syntax:</strong> P0FEngine <em>on|off</em><br>
+<strong>Default:</strong> <em>off</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FEngine</code> directive controls whether the <code>mod_p0f</code>
+module will manage the separate <code>p0f</code> process, and communicate
+with it via a Unix domain socket to obtain the fingerprint for the connected
+client.
+
+<p>
+<hr>
+<h2><a name="P0FLog">P0FLog</a></h2>
+<strong>Syntax:</strong> P0FLog <em>file|"none"</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FLog</code> directive is used to specify a log file for
+<code>mod_p0f</code>'s reporting.  The <em>file</em> parameter given must be
+the full path to the file to use for logging.
+
+<p>
+Note that this path must <b>not</b> be to a world-writable directory and,
+unless <code>AllowLogSymlinks</code> is explicitly set to <em>on</em>
+(generally a bad idea), the path must <b>not</b> be a symbolic link.
+
+<p>
+<hr>
+<h2><a name="P0FSocket">P0FSocket</a></h2>
+<strong>Syntax:</strong> P0FSocket <em>path</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FSocket</code> directive is used to specify the path to
+a Unix domain socket, which will be used by <code>mod_p0f</code> to
+communicate with the running <code>p0f</code> process to obtain the
+fingerprint of the connected client.
+
+<P>
+Note that the <code>P0FSocket</code> diretive is <b>required</b>.
+
+<p>
+<hr>
+<h2><a name="Installation">Installation</a></h2>
+To install <code>mod_p0f</code>, follow the usual steps for using contrib
+modules in proftpd.  Copy the <code>mod_p0f.c</code> file into:
+<pre>
+  cp mod_p0f.c <i>proftpd-dir</i>/contrib/
+</pre>
+after unpacking the latest proftpd-1.3.4 source code.  For including
+<code>mod_p0f</code> as a staticly linked module:
+<pre>
+  ./configure --with-modules=mod_p0f ...
+</pre>
+Alternatively, <code>mod_p0f</code> can be built as a DSO module:
+<pre>
+  ./configure --enable-dso --with-shared=mod_p0f ...
+</pre>
+Then follow the usual steps:
+<pre>
+  make
+  make install
+</pre>
+
+<p>
+Alternatively, if your proftpd was compiled with DSO support, you can
+use the <code>prxs</code> tool to build <code>mod_p0f</code> as a shared
+module:
+<pre>
+  prxs -c -i -d mod_p0f.c
+</pre>
+
+<p>
+<hr>
+<h2><a name="Usage">Usage</a></h2>
+
+<p>
+<b>Access Controls</b><br>
+If any <code>P0FAllowFilter</code> or <code>P0FDenyFilter</code>
+directives are configured, the <code>mod_p0f</code> module applies them
+against the fingerprint information retrieved from the <code>p0f</code>
+process.  First any <code>P0FAllowFilter</code>s are checked.  If <i>any</i>
+of these filters match the connecting client's information, the FTP command is
+allowed.  Next, any <code>P0FDenyFilter</code>s are checked.  If <i>any</i> of
+these filters match the connecting client's information, the FTP command is
+denied.  Otherwise, the FTP command is allowed.
+
+<p>
+<b>Example Configuration</b><br>
+The <code>mod_p0f</code> module uses a Unix domain socket for communicating
+with a <code>p0f</code> process, which the module starts/stops.  Thus it does
+not require any separate <code>&lt;VirtualHost&gt;</code> sections, and does
+not interfere with the normal FTP operations.
+
+<p>
+Here is an example configuration for <code>mod_p0f</code>:
+<pre>
+  &lt;IfModule mod_p0f.c&gt;
+    P0FEngine on
+    P0FLog /etc/proftpd/p0f.log
+
+    # Configure the path to the p0f signatures file
+    P0FSignatures /etc/p0f.fp
+  &lt;/IfModule&gt;
+</pre>
+
+<p>
+<b>Logging</b><br>
+The <code>mod_p0f</code> module supports different forms of logging.  The
+main module logging is done via the <code>P0FLog</code> directive.  For
+debugging purposes, the module also uses <a href="http://www.proftpd.org/docs/howto/Tracing.html">trace logging</a>, via the module-specific "p0f" log
+channels.  Thus for trace logging, to aid in debugging, you
+would use the following in your <code>proftpd.conf</code>:
+<pre>
+  TraceLog /path/to/p0f-trace.log
+  Trace p0f:20
+</pre>
+This trace logging can generate large files; it is intended for debugging
+use only, and should be removed from any production configuration.
+
+<p>
+<b>Environment Variables</b><br>
+The <code>mod_p0f</code> module will set the following environment
+variables whenever a client connects, assuming that the <code>p0f</code>
+process can identify the connecting system:
+<ul>
+  <li><code>P0F_OS</code>
+  <li><code>P0F_OS_DETAILS</code>
+</ul>
+
+<p>
+<hr><br>
+
+Author: <i>$Author: tj $</i><br>
+Last Updated: <i>$Date: 2011/10/19 17:16:52 $</i><br>
+
+<br><hr>
+
+<font size=2><b><i>
+&copy; Copyright 2011 TJ Saunders<br>
+ All Rights Reserved<br>
+</i></b></font>
+
+<hr><br>
+
+</body>
+</html>
+
