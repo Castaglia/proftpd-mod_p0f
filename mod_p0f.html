@@ -347,14 +347,28 @@ not require any separate <code>&lt;VirtualHost&gt;</code> sections, and does
 not interfere with the normal FTP operations.
 
 <p>
-Here is an example configuration for <code>mod_p0f</code>:
+Here is an example configuration for <code>mod_p0f</code>, <i>e.g.</i> on
+a Linux machine:
 <pre>
   &lt;IfModule mod_p0f.c&gt;
     P0FEngine on
     P0FLog /etc/proftpd/p0f.log
 
+    # Explicitly set the path to the p0f executable
+    P0FPath /usr/local/bin/p0f
+
+    # Fortunately libpcap, on a Linux machine, supports the "any" device
+    # parameter
+    P0FDevice any
+
+    # Specify the path to the socket to use for talking to p0f
+    P0FSocket /tmp/p0f.sock
+
     # Configure the path to the p0f signatures file
     P0FSignatures /etc/p0f.fp
+
+    # Log the output from the running p0f process to the P0FLog, too
+    P0FOptions VerboseLogging
   &lt;/IfModule&gt;
 </pre>
 
