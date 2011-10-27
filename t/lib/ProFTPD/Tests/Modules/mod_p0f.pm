@@ -14,10 +14,18 @@ use ProFTPD::TestSuite::Utils qw(:auth :config :running :test :testsuite);
 $| = 1;
 
 # XXX Configure this to wherever the 'p0f' executable lives on your system
-my $p0f_path = '/Users/tjsaunders/src/p0f/p0f';
+#my $p0f_path = '/Users/tjsaunders/src/p0f/p0f';
+my $p0f_path = '/home/tj/src/p0f/p0f';
 
-$ENV{PROFTPD_TEST_BIN} = '/Users/tjsaunders/proftpd/devel/build/cvs/sbin/proftpd';
+#$ENV{PROFTPD_TEST_BIN} = '/Users/tjsaunders/proftpd/devel/build/cvs/sbin/proftpd';
+$ENV{PROFTPD_TEST_BIN} = '/home/tj/proftpd/devel/build/cvs/sbin/proftpd';
 $ENV{TEST_VERBOSE} = 1;
+
+# On a Mac OSX, the loopback device is lo0.
+#my $p0f_device = 'lo0';
+
+# On a Linux machine, the loopback device is lo.
+my $p0f_device = 'lo';
 
 my $order = 0;
 
@@ -270,9 +278,11 @@ sub p0f_retr_allowed {
         P0FEngine => 'on',
         P0FLog => $log_file,
         P0FPath => $p0f_path,
-        P0FDevice => 'lo0',
+#        P0FDevice => $p0f_device,
+        P0FDevice => 'any',
         P0FSocket => $p0f_socket,
         P0FSignatures => $p0f_sigs,
+        P0FOptions => 'VerboseLogging',
       },
 
       'mod_delay.c' => {
