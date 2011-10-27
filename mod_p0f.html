@@ -17,7 +17,7 @@
 <p>
 The <code>mod_p0f</code> module uses the
 <a href="http://lcamtuf.coredump.cx/p0f.shtml"><code>p0f</code></a> tool
-for obtaining passive "fingerprint" of the connecting client system.  This
+for obtaining a passive <a href="http://en.wikipedia.org/wiki/TCP/IP_stack_fingerprinting">&quot;fingerprint&quot;</a> of the connecting client system.  This
 fingerprint information can then be used to configure directory/file ACLs.
 
 <p>
@@ -40,12 +40,13 @@ questions, concerns, or suggestions regarding this module.
 <h2>Directives</h2>
 <ul>
   <li><a href="#P0FAllowFilter">P0FAllowFilter</a>
-  <li><a href="#P0FDenyFilter">P0FDenyFilter</a>
   <li><a href="#P0FCacheSize">P0FCacheSize</a>
+  <li><a href="#P0FDenyFilter">P0FDenyFilter</a>
   <li><a href="#P0FDevice">P0FDevice</a>
   <li><a href="#P0FEngine">P0FEngine</a>
   <li><a href="#P0FLog">P0FLog</a>
   <li><a href="#P0FOptions">P0FOptions</a>
+  <li><a href="#P0FPath">P0FPath</a>
   <li><a href="#P0FSignatures">P0FSignatures</a>
   <li><a href="#P0FSocket">P0FSocket</a>
   <li><a href="#P0FUser">P0FUser</a>
@@ -53,41 +54,109 @@ questions, concerns, or suggestions regarding this module.
 
 <p>
 <hr>
-<h2><a name="SNMPAgent">SNMPAgent</a></h2>
-<strong>Syntax:</strong> SNMPAgent master|agentx <em>ip-address</em> <em>port</em><br>
+<h2><a name="P0FAllowFilter">P0FAllowFilter</a></h2>
+<strong>Syntax:</strong> P0FAllowFilter <em>cmds</em> <em>filter</em> <em>pattern>/em><br>
 <strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> <code>&lt;Directory&gt;</code>, .ftpaccess<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FAllowFilter</code> directive is used to configure ACLs for the
+given <em>cmds</em>, based on the client fingerprint data provided by
+<code>p0f</code>.
+
+<p>
+Multiple <code>P0FAllowFilter</code> directives in the configuration are
+supported; if <b>any</b> filter matches the connecting client, the command
+will be allowed.
+
+<p>
+The <em>filter</em> parameter specifies the fingerprint value to which to apply
+the configured <em>pattern</em> for matching.  The possible <em>filter</em>
+values are:
+<ul>
+  <li><code>OS</code>
+  <li><code>OSDetails</code>
+  <li><code>NetworkDistance</code>
+  <li><code>NetworkLink</code>
+  <li><code>TrafficType</code>
+</ul>
+
+<p>
+The <em>pattern</em> parameter is <b>case-insensitive</b> regular expression
+that will be applied to the specified <em>filter</em> value, if available.
+
+<p>
+Examples:
+<pre>
+  # Allow Linux clients to download files
+  &lt;Directory <i>/path/to/dir</i>&gt;
+    P0FAllowFilter RETR OS Linux
+
+    # Reject FreeBSD clients trying to upload
+    P0FDenyFilter APPE,STOR OS FreeBSD
+  &lt;/Directory&gt;
+</pre>
+
+<p>
+<hr>
+<h2><a name="P0FCacheSize">P0FCacheSize</a></h2>
+<strong>Syntax:</strong> P0FCacheSize <em>cache-size</em><br>
+<strong>Default:</strong> <em>128</em><br>
 <strong>Context:</strong> &quot;server config&quot;<br>
 <strong>Module:</strong> mod_p0f<br>
 <strong>Compatibility:</strong> 1.3.4rc3 and later
 
 <p>
-The <code>SNMPAgent</code> directive configures the <code>mod_snmp</code>
-module to act as a "master" SNMP agent/entity, or as an AgentX sub-agent.
-(<b>Note</b> that the AgentX capability is not currently implemented.)
+The <code>P0FCacheSize</code> directive configures the in-memory cache size
+of the <code>p0f</code> process; it configures the <code>-c</code>
+command-line option for <code>p0f</code>.  The <em>cache-size</em> value
+should be a number.
 
 <p>
-The <em>ip-address</em> and <em>port</em> parameters configure the address/port
-on which <code>mod_snmp</code> will listen for UDP SNMP packets.
-
-<p>
-Note that the <code>SNMPAgent</code> diretive is <b>required</b>.
-
-<p>
-<hr>
-<h2><a name="SNMPCommunity">SNMPCommunity</a></h2>
-<strong>Syntax:</strong> SNMPCommunity <em>community</em><br>
-<strong>Default:</strong> <em>None</em><br>
-<strong>Context:</strong> &quot;server config&quot;<br>
-<strong>Module:</strong> mod_snmp<br>
+<hr><h2><a name="P0FDenyFilter">P0FDenyFilter</a></h2>
+<strong>Syntax:</strong> P0FDenyFilter <em>cmds</em> <em>filter</em> <em>pattern>/em><br>
+<strong>Default:</strong> <em>none</em><br>
+<strong>Context:</strong> <code>&lt;Directory&gt;</code>, .ftpaccess<br>
+<strong>Module:</strong> mod_p0f<br>
 <strong>Compatibility:</strong> 1.3.4rc3 and later
 
 <p>
-The <code>SNMPCommunity</code> directive configures the <em>community</em>
-string (effectively a passphrase) used for authenticating SNMPv1 and SNMPv2
-messages.
+The <code>P0FDenyFilter</code> directive is used to configure ACLs for the
+given <em>cmds</em>, based on the client fingerprint data provided by
+<code>p0f</code>.
 
 <p>
-Note that the <code>SNMPCommunity</code> diretive is <b>required</b>.
+Multiple <code>P0FDenyFilter</code> directives in the configuration are
+supported; if <b>any</b> filter matches the connecting client, the command
+will be denied.
+
+<p>
+See <a href="#P0FAllowFilter"><code>P0FAllowFilter</code></a> for
+a description of the directive syntax and parameters.
+
+<p>
+<hr>
+<h2><a name="P0FDevice">P0FDevice</a></h2>
+<strong>Syntax:</strong> P0FDevice <em>device</em><br>
+<strong>Default:</strong> <em>off</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FDevice</code> directive configures the <em>device</em> to which
+the <code>p0f</code> process should bind; it configures the <code>-i</code>
+command-line option for <code>p0f</code>.
+
+<p>
+Example:
+<pre>
+  # Try to listen on any/all devices (assuming 'any' is supported by
+  # libpcap on your platform).
+  P0FDevice any
+</pre>
 
 <p>
 <hr>
@@ -125,6 +194,74 @@ unless <code>AllowLogSymlinks</code> is explicitly set to <em>on</em>
 
 <p>
 <hr>
+<h2><a name="P0FOptions">P0FOptions</a></h2>
+<strong>Syntax:</strong> P0FOptions <em>opt1 ...</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+The <code>P0FOptions</code> directive is used to configure various optional
+behavior of <code>mod_p0f</code>.  <b>Note</b>: all of the configured
+<code>P0FOptions</code> parameters <b>must</b> appear on the same line in
+the configuration; only the first <code>P0FOptions</code> directive that
+appears in the configuration is used.
+
+<p>
+Example:
+<pre>
+  P0FOptions VerboseLogging
+</pre>
+
+<p>
+The currently implemented options are:
+<ul>
+  <li><code>VerboseLogging</code><br>
+    <p>
+    This option configures the <code>p0f</code> process to log its output
+    to the configured <a href="#P0FLog"><code>P0FLog</code></a> file.  This
+    option is primary useful for debugging any <code>p0f</code> interactions
+    and configuration.
+</ul>
+
+<p>
+<hr>
+<h2><a name="P0FPath">P0FPath</a></h2>
+<strong>Syntax:</strong> P0FPath <em>path</em><br>
+<strong>Default:</strong> <code>p0f</code><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FPath</code> directive configures the exact path to the
+<code>p0f</code> executable that <code>mod_p0f</code> should use.  By
+default, <code>mod_p0f</code> will use just "p0f", and assume that the
+executable is available on the <code>PATH</code>.
+
+<p>
+<hr>
+<h2><a name="P0FSignatures">P0FSignatures</a></h2>
+<strong>Syntax:</strong> P0FSignatures <em>path</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FSignatures</code> directive is used to specify the full path
+to the fingerprint signatures file that the <code>p0f</code> process should
+use.  The default is whatever the <code>p0f</code> executable deems to
+be the default; it is best to configure this path explicitly.
+
+<p>
+Example:
+<pre>
+  P0FSignatures /etc/p0f.fp
+</pre>
+
+<p>
+<hr>
 <h2><a name="P0FSocket">P0FSocket</a></h2>
 <strong>Syntax:</strong> P0FSocket <em>path</em><br>
 <strong>Default:</strong> <em>None</em><br>
@@ -139,7 +276,22 @@ communicate with the running <code>p0f</code> process to obtain the
 fingerprint of the connected client.
 
 <P>
-Note that the <code>P0FSocket</code> diretive is <b>required</b>.
+Note that the <code>P0FSocket</code> directive is <b>required</b>.
+
+<p>
+<hr>
+<h2><a name="P0FUser">P0FUser</a></h2>
+<strong>Syntax:</strong> P0FUser <em>user</em><br>
+<strong>Default:</strong> <em>None</em><br>
+<strong>Context:</strong> &quot;server config&quot;<br>
+<strong>Module:</strong> mod_p0f<br>
+<strong>Compatibility:</strong> 1.3.4rc3 and later
+
+<p>
+The <code>P0FUser</code> directive configures the <code>-u</code> command-line
+option for <code>p0f</code>.  The configured <em>user</em> <b>must</b> be
+a system user (<i>i.e.</i> recognized by the <code>p0f</code> process); it
+<b>cannot</b> be a proftpd-recognized virtual user.
 
 <p>
 <hr>
@@ -228,6 +380,9 @@ process can identify the connecting system:
 <ul>
   <li><code>P0F_OS</code>
   <li><code>P0F_OS_DETAILS</code>
+  <li><code>P0F_NETWORK_DISTANCE</code>
+  <li><code>P0F_NETWORK_LINK</code>
+  <li><code>P0F_TRAFFIC_TYPE</code>
 </ul>
 
 <p>
