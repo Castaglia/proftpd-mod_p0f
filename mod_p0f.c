@@ -1,6 +1,6 @@
 /*
  * ProFTPD - mod_p0fp
- * Copyright (c) 2011 TJ Saunders
+ * Copyright (c) 2011-2021 TJ Saunders
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1293,29 +1293,32 @@ MODRET set_p0flog(cmd_rec *cmd) {
 
 /* usage: P0FPath /path/to/p0f */
 MODRET set_p0fpath(cmd_rec *cmd) {
+  const char *path;
   struct stat st;
   int res;
 
   CHECK_ARGS(cmd, 1);
   CHECK_CONF(cmd, CONF_ROOT);
 
-  if (*cmd->argv[1] != '/') {
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '",
-      cmd->argv[1], "'", NULL));
+  path = cmd->argv[1];
+
+  if (*path != '/') {
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '", path, "'",
+      NULL));
   }
 
-  res = stat(cmd->argv[1], &st);
+  res = stat(path, &st);
   if (res < 0) {
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unable to verify P0FPath '",
-      cmd->argv[1], "': ", strerror(errno), NULL));
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unable to verify P0FPath '", path,
+      "': ", strerror(errno), NULL));
   }
 
   if (!S_ISREG(st.st_mode)) {
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unable to use P0FPath '",
-      cmd->argv[1], "': Not a regular file", NULL));
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unable to use P0FPath '", path,
+      "': Not a regular file", NULL));
   }
 
-  (void) add_config_param_str(cmd->argv[0], 1, cmd->argv[1]);
+  (void) add_config_param_str(cmd->argv[0], 1, path);
   return PR_HANDLED(cmd);
 }
 
@@ -1328,7 +1331,7 @@ MODRET set_p0foptions(cmd_rec *cmd) {
   CHECK_CONF(cmd, CONF_ROOT);
 
   for (i = 1; i < cmd->argc; i++) {
-    if (strncasecmp(cmd->argv[i], "VerboseLogging", 15) == 0) {
+    if (strcasecmp(cmd->argv[i], "VerboseLogging") == 0) {
       opts |= P0F_OPT_VERBOSE_LOGGING;
 
     } else {
@@ -1346,56 +1349,64 @@ MODRET set_p0foptions(cmd_rec *cmd) {
 
 /* usage: P0FSignatures /path/to/p0f.fp */
 MODRET set_p0fsignatures(cmd_rec *cmd) {
+  const char *path;
   int res;
   struct stat st;
  
   CHECK_ARGS(cmd, 1);
   CHECK_CONF(cmd, CONF_ROOT);
- 
-  if (*cmd->argv[1] != '/') {
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '",
-      cmd->argv[1], "'", NULL));
+
+  path = cmd->argv[1];
+  if (*path != '/') {
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '", path,
+      "'", NULL));
   }
 
-  res = stat(cmd->argv[1], &st);
+  res = stat(path, &st);
   if (res < 0) {
     CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "unable to verify P0FSignatures '",
-      cmd->argv[1], "': ", strerror(errno), NULL));
+      path, "': ", strerror(errno), NULL));
   }
 
-  (void) add_config_param_str(cmd->argv[0], 1, cmd->argv[1]);
+  (void) add_config_param_str(cmd->argv[0], 1, path);
   return PR_HANDLED(cmd);
 }
 
 /* usage: P0FSocket path */
 MODRET set_p0fsocket(cmd_rec *cmd) {
+  const char *path;
+
   CHECK_ARGS(cmd, 1);
   CHECK_CONF(cmd, CONF_ROOT);
 
-  if (*cmd->argv[1] != '/') {
-    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '",
-      cmd->argv[1], "'", NULL));
+  path = cmd->argv[1];
+  if (*path != '/') {
+    CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a full path: '", path,
+      "'", NULL));
   }
 
-  (void) add_config_param_str(cmd->argv[0], 1, cmd->argv[1]);
+  (void) add_config_param_str(cmd->argv[0], 1, path);
   return PR_HANDLED(cmd);
 }
 
 /* usage: P0FUser system-user */
 MODRET set_p0fuser(cmd_rec *cmd) {
+  const char *name;
   struct passwd *pw;
 
   CHECK_ARGS(cmd, 1);
   CHECK_CONF(cmd, CONF_ROOT);
 
+  name = cmd->argv[1];
+
   /* Make sure the configured user name is a valid system user. */
-  pw = getpwnam(cmd->argv[1]);
+  pw = getpwnam(name);
   if (pw == NULL) {
     CONF_ERROR(cmd, pstrcat(cmd->tmp_pool, "must be a valid system user: ",
-      cmd->argv[1], NULL));
+      name, NULL));
   }
 
-  (void) add_config_param_str(cmd->argv[0], 1, cmd->argv[1]);
+  (void) add_config_param_str(cmd->argv[0], 1, name);
   return PR_HANDLED(cmd);
 }
 
@@ -1428,11 +1439,9 @@ MODRET p0f_pre_cmd(cmd_rec *cmd) {
 
 #if defined(PR_SHARED_MODULE)
 static void p0f_mod_unload_ev(const void *event_data, void *user_data) {
-  if (strncmp((const char *) event_data, "mod_p0f.c", 11) == 0) {
-    register unsigned int i;
-
+  if (strcmp((const char *) event_data, "mod_p0f.c") == 0) {
     /* Unregister ourselves from all events. */
-    pr_event_unregister(&snmp_module, NULL, NULL);
+    pr_event_unregister(&p0f_module, NULL, NULL);
 
     /* Stop p0f process */
     p0f_stop(p0f_proc_pid);
@@ -1451,7 +1460,7 @@ static void p0f_postparse_ev(const void *event_data, void *user_data) {
   int res;
 
   c = find_config(main_server->conf, CONF_PARAM, "P0FEngine", FALSE);
-  if (c) {
+  if (c != NULL) {
     p0f_engine = *((int *) c->argv[0]);
   }
 
@@ -1460,10 +1469,10 @@ static void p0f_postparse_ev(const void *event_data, void *user_data) {
   }
 
   c = find_config(main_server->conf, CONF_PARAM, "P0FLog", FALSE);
-  if (c) {
+  if (c != NULL) {
     p0f_logname = c->argv[0];
 
-    if (strncasecmp(p0f_logname, "none", 5) != 0) {
+    if (strcasecmp(p0f_logname, "none") != 0) {
       int xerrno;
 
       pr_signals_block();
@@ -1508,7 +1517,6 @@ static void p0f_postparse_ev(const void *event_data, void *user_data) {
 }
 
 static void p0f_restart_ev(const void *event_data, void *user_data) {
-
   if (p0f_engine == FALSE) {
     return;
   }
@@ -1639,7 +1647,7 @@ static int p0f_sess_init(void) {
   int res;
 
   c = find_config(main_server->conf, CONF_PARAM, "P0FEngine", FALSE);
-  if (c) {
+  if (c != NULL) {
     p0f_engine = *((int *) c->argv[0]);
   }
 
@@ -1737,4 +1745,3 @@ module p0f_module = {
   /* Module version */
   MOD_P0F_VERSION
 };
-
